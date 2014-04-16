@@ -1,0 +1,8 @@
+#!/bin/bash
+
+tabs 4
+
+# Paths of odexed apps
+declare -A path
+path["framework"]=/system/framework
+path["app"]=/system/app

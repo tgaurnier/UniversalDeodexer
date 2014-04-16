@@ -1,0 +1,231 @@
+#!/bin/bash
+
+# Recieves exit status of last command, and a message to print if an error had occured
+function catchError {
+	if [ $1 != 0 ]; then
+		echo "$2"
+		exit $1
+	fi
+}
+
+# Get path of script
+if [ $0 == "./deodex" ]; then
+	exec_dir="./"
+else
+	real_path=$(realpath $0)
+	catchError $? "Failed to use realpath $0"
+	exec_dir=${real_path%/deodex}
+fi
+
+# Import config
+source $exec_dir/config
+
+
+
+
+
+# Gets extension (apk or jar) and echos it
+function getExt {
+	# Search paths for file
+	for key in ${!path[@]}; do
+		for file in ${list[$key]}; do
+			if [[ $file =~ ^"$1."("apk"|"jar") ]]; then
+				echo ${file: -3}
+				return 0
+			fi
+		done
+	done
+}
+
+
+# Checks if file is odexed, echos true if it is, false if not
+function isOdexed {
+	for key in ${!path[@]}; do
+		for file in ${list[$key]}; do
+			if [ "$file" == "$1.odex" ]; then
+				echo true
+				return 0
+			fi
+		done
+	done
+
+	echo false
+}
+
+
+# Deodex file, $1 is filename (without extension), $2 is path to file on device, $3 is extension
+function deodex {
+	# Pull both appropriate files from device
+	echo "Pulling $2/$1.$3 and $2/$1.odex..."
+	adb pull "$2/$1.odex" "original/$2/$1.odex"
+	catchError $? "Failed to pull $2/$1.odex"
+	adb pull "$2/$1.$3" "original/$2/$1.$3"
+	catchError $? "Failed to pull $2/$1.$3"
+
+	# If path in deodexed folder doesn't exist, create it
+	mkdir -p "deodexed$2"
+
+	# Copy original package to deodexed folder
+	echo "Copying original$2/$1.$3 to deodexed$2/$1.$3"
+	cp -f "original$2/$1.$3" "deodexed$2/$1.$3"
+	catchError $? "Failed to cp original$2/$1.$3 to deodexed$2/$1.$3"
+
+	# If smali folder isn't empty, then empty it
+	test "$(ls -A smali)" && rm -r smali/*
+	# If classes.dex file exists delete it
+	[ -f deodexed/classes.dex ] && rm deodexed/classes.dex
+
+	# Baksmali odex file
+	echo "Baksmali-ing original$2/$1.odex..."
+	${exec_dir}/baksmali -x "original$2/$1.odex" -d framework -o smali
+	catchError $? "Failed to baksmali original$2/$1.odex"
+
+	# Smali to classes.dex
+	echo "Smali-ing to deodexed/classes.dex..."
+	java -jar ${exec_dir}/smali.jar smali -o "deodexed/classes.dex"
+	catchError $? "Failed to smali to deodexed/$1/$3"
+
+	# Update package with classes.dex
+	pushd deodexed
+	echo "Updating deodexed$2/$1.$3 with classes.dex..."
+	7z u -tzip ".$2/$1.$3" classes.dex
+	catchError $? "Failed to update deodexed$2/$1.$3 with classes.dex"
+	popd
+
+	# Push deodexed file back to phone
+	echo "Pushing deodexed$2/$1.$3 to $2/$1.$3"
+	adb push "deodexed$2/$1.$3" "$2/$1.$3"
+	catchError $? "Failed to push deodexed$2/$1.$3 to $2/$1.$3"
+
+	# Remove odex file from phone
+	echo "Removing $2/$1.odex..."
+	adb shell rm "$2/$1.odex"
+	catchError $? "Failed to rm $2/$1.odex"
+
+	# Cleanup
+	echo "Cleaning up..."
+	rm -r smali/*
+	rm deodexed/classes.dex
+}
+
+
+############################################### MAIN ###############################################
+
+if [ $# -gt 0 ] && [ $1 != "-h" ] && [ $1 != "--help" ]; then
+	# If folders don't exist create them
+	mkdir -p framework
+	mkdir -p original
+	mkdir -p deodexed
+	mkdir -p smali
+
+	# If default framework hasn't been pulled, then pull it
+	if test ! "$(ls -A framework)"; then
+		echo "Pulling default framework..."
+		adb pull "${path[framework]}/" "framework/"
+		catchError $? "Failed to pull default framework"
+	fi
+
+	declare -A list
+	# Make space separated list of files for each path
+	for key in "${!path[@]}"; do
+		# (path name)_list is array of files in path
+		file_list=($(adb shell ls ${path[$key]}))
+		file_list=(${file_list[@]//[^a-zA-Z0-9_.-]/})
+		catchError $? "Failed to use 'adb shell ls'"
+		list[$key]="${file_list[@]}"
+	done
+
+	# Switch for main parameter
+	case $1 in
+		--restore) # Push all original packages and odex files back to device
+			for key in ${!path[@]}; do
+				for file in $(ls original/${path[$key]}); do
+					echo "Pushing original${path[$key]}/$file to ${path[$key]}/$file"
+					adb push "original${path[$key]}/$file" "${path[$key]}/$file"
+				done
+			done
+		;;
+
+		--all) # Attempt to deodex ALL odexed files on device
+			no_odexes=true
+			for key in ${!path[@]}; do
+				for file in ${list[$key]}; do
+					if [[ $file == *.odex ]]; then
+						no_odexes=false
+						deodex ${file%.odex} ${path[$key]} $(getExt ${file%.odex})
+					fi
+				done
+			done
+
+			# If there are no files to be deodexed in paths
+			if $no_odexes; then
+				echo "There are no packages to deodex"
+			fi
+		;;
+
+		*) # Attempt to deodex specified file
+			found=false
+
+			# Search paths for file
+			for key in ${!path[@]}; do
+				for file in ${list[$key]}; do
+					if [[ $file =~ ^"$1."("apk"|"jar") ]]; then
+						sel_path=${path[$key]}
+						ext=${file: -3}
+						found=true
+						break
+					fi
+				done
+			done
+
+			# If file was found, check if it is odexed
+			if $found; then
+				if [ $(isOdexed $1) == true ]; then
+					deodex $1 $sel_path $ext
+				else
+					echo "$1.apk/jar is not currently odexed"
+				fi
+			else
+				echo "$1.apk/jar was not found on device"
+			fi
+		;;
+	esac
+
+else
+	printf "
+
+--------------------------Universal Deodexer for Bash---------------------------
+
+WARNING:
+	Make sure you have a PROPER backup of your rom before using this script,
+	if you are unsure of what a proper backup is, then you probably shouldn't
+	be doing this.
+
+NOTE:
+	It is recommended for you to have your phone booted into recovery with the
+	system partition mounted, this script will simultaneously pull, deodex,
+	and push files back to phone, and if certain files are pushed back with
+	the phone booted to Android it can cause it to force restart, which may
+	have unexpected results.
+
+USES:
+	deodex <filename-without-extension>
+		This will detect where the file is located on the phone, then it will
+		pull and deodex the file, then push the file back, and delete the
+		odex file from the phone.
+
+		Example: deodex SystemUI
+
+	deodex --all
+		This will attempt to pull, deodex, then push back all odexed files on
+		the phone, then it will delete all odex files from phone.
+
+	deodex --restore
+		This will attempt to push all original packages with odex files back
+		to phone, restoring it to it's odexed condition.
+
+--------------------------------------------------------------------------------
+	\n"
+fi
+
+exit 0
