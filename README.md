@@ -1,8 +1,7 @@
-UniversalDeodexer
-=================
+Universal Deodexer for Bash
+===========================
 
 --------------------------------------------------------------------------------
---------------------------Universal Deodexer for Bash---------------------------
 
 WARNING:
 	Make sure you have a PROPER backup of your rom before using this script,
